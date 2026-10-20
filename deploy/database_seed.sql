@@ -103,52 +103,35 @@ INSERT INTO `warehouses` (`id`, `code`, `city`, `distance_km`, `has_cold_storage
 -- ─────────────────────────────────────────────────────────────────────────────
 
 INSERT INTO `inventories` (`warehouse_id`, `product_id`, `quantity`, `created_at`, `updated_at`) VALUES
--- W01 (Surabaya, 5 km):    Gloves=200, HepB=0,  Syringes=500, Tetanus=0,  Paracetamol=300
+-- W01 (Surabaya, 5 km):    Gloves=200, Syringes=500, Paracetamol=300
   (1, 1, 200, NOW(), NOW()),
-  (1, 2,   0, NOW(), NOW()),
   (1, 3, 500, NOW(), NOW()),
-  (1, 4,   0, NOW(), NOW()),
   (1, 5, 300, NOW(), NOW()),
--- W02 (Surabaya, 12 km):   Gloves=50,  HepB=30, Syringes=0,   Tetanus=20, Paracetamol=0
+-- W02 (Surabaya, 12 km):   Gloves=50, HepB=30, Tetanus=20
   (2, 1,  50, NOW(), NOW()),
   (2, 2,  30, NOW(), NOW()),
-  (2, 3,   0, NOW(), NOW()),
   (2, 4,  20, NOW(), NOW()),
-  (2, 5,   0, NOW(), NOW()),
--- W03 (Sidoarjo, 25 km):   Gloves=300, HepB=0,  Syringes=200, Tetanus=0,  Paracetamol=0
+-- W03 (Sidoarjo, 25 km):   Gloves=300, Syringes=200
   (3, 1, 300, NOW(), NOW()),
-  (3, 2,   0, NOW(), NOW()),
   (3, 3, 200, NOW(), NOW()),
-  (3, 4,   0, NOW(), NOW()),
-  (3, 5,   0, NOW(), NOW()),
--- W04 (Gresik, 30 km):     Gloves=0,   HepB=40, Syringes=0,   Tetanus=25, Paracetamol=100
-  (4, 1,   0, NOW(), NOW()),
+-- W04 (Gresik, 30 km):     HepB=40, Tetanus=25, Paracetamol=100
   (4, 2,  40, NOW(), NOW()),
-  (4, 3,   0, NOW(), NOW()),
   (4, 4,  25, NOW(), NOW()),
   (4, 5, 100, NOW(), NOW()),
--- W05 (Malang, 90 km):     Gloves=400, HepB=0,  Syringes=300, Tetanus=0,  Paracetamol=500
+-- W05 (Malang, 90 km):     Gloves=400, Syringes=300, Paracetamol=500
   (5, 1, 400, NOW(), NOW()),
-  (5, 2,   0, NOW(), NOW()),
   (5, 3, 300, NOW(), NOW()),
-  (5, 4,   0, NOW(), NOW()),
   (5, 5, 500, NOW(), NOW()),
--- W06 (Malang, 95 km):     Gloves=0,   HepB=20, Syringes=100, Tetanus=30, Paracetamol=0
-  (6, 1,   0, NOW(), NOW()),
+-- W06 (Malang, 95 km):     HepB=20, Syringes=100, Tetanus=30
   (6, 2,  20, NOW(), NOW()),
   (6, 3, 100, NOW(), NOW()),
   (6, 4,  30, NOW(), NOW()),
-  (6, 5,   0, NOW(), NOW()),
--- W07 (Pasuruan, 45 km):   Gloves=150, HepB=8,  Syringes=0,   Tetanus=10, Paracetamol=0
+-- W07 (Pasuruan, 45 km):   Gloves=150, HepB=8, Tetanus=10
   (7, 1, 150, NOW(), NOW()),
   (7, 2,   8, NOW(), NOW()),
-  (7, 3,   0, NOW(), NOW()),
   (7, 4,  10, NOW(), NOW()),
-  (7, 5,   0, NOW(), NOW()),
--- W08 (Jember, 150 km):    Gloves=0,   HepB=60, Syringes=0,   Tetanus=50, Paracetamol=200
-  (8, 1,   0, NOW(), NOW()),
+-- W08 (Jember, 150 km):    HepB=60, Tetanus=50, Paracetamol=200
   (8, 2,  60, NOW(), NOW()),
-  (8, 3,   0, NOW(), NOW()),
   (8, 4,  50, NOW(), NOW()),
   (8, 5, 200, NOW(), NOW());
 

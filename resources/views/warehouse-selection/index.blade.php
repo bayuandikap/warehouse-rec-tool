@@ -120,7 +120,6 @@
                     <thead>
                         <tr>
                             <th>Product</th>
-                            <th>Requested</th>
                             <th>Allocated</th>
                         </tr>
                     </thead>
@@ -128,7 +127,6 @@
                         ${w.items.map(i => `
                             <tr>
                                 <td>${escHtml(i.product_code)} — ${escHtml(i.product_name)}</td>
-                                <td>${i.requested_quantity}</td>
                                 <td>${i.allocated_quantity}</td>
                             </tr>`).join('')}
                     </tbody>
@@ -181,7 +179,7 @@
                 <div class="metrics">
                     <div class="metric">Warehouse(s) used: <span>${data.allocations.length}</span></div>
                     <div class="metric">Allocated lines: <span>${data.total_allocated_lines}</span></div>
-                    <div class="metric">Distance score: <span>${data.total_distance_score.toLocaleString()}</span></div>
+                    <div class="metric">Distance score: <span>${(data.total_distance_score ?? 0).toLocaleString()}</span></div>
                 </div>
                 <h3 style="font-size:.95rem;font-weight:600;margin-bottom:.5rem;">Warehouse Allocations</h3>
                 ${renderAllocations(data.allocations)}
@@ -230,6 +228,21 @@
         btn.innerHTML = '<span class="spinner" aria-hidden="true"></span> Evaluating…';
 
         const items = collectItems();
+
+        // Client-side guard: catch empty or non-numeric quantity fields
+        // before sending them to the server (parseInt of an empty string is NaN).
+        let hasError = false;
+        items.forEach((item, i) => {
+            if (!Number.isInteger(item.quantity) || item.quantity < 1) {
+                renderErrors({ [`items.${i}.quantity`]: [`Line ${i + 1}: quantity must be a whole number of at least 1.`] });
+                hasError = true;
+            }
+        });
+        if (hasError) {
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+            return;
+        }
 
         try {
             const resp = await fetch(API_URL, {

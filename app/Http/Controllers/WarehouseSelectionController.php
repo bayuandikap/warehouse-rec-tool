@@ -8,7 +8,6 @@ use App\Http\Resources\SelectionResultResource;
 use App\Models\Product;
 use App\Services\WarehouseSelectionService;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\View\View;
 
@@ -24,24 +23,28 @@ class WarehouseSelectionController extends Controller
 
     public function index(): View
     {
-        $products = Product::orderBy('code')->get();
+        // Only two fields needed by the view — avoid hydrating unused columns.
+        $products = Product::select(['code', 'name'])->orderBy('code')->get();
+
         return view('warehouse-selection.index', compact('products'));
     }
 
     // -----------------------------------------------------------------------
-    // API endpoint
+    // API endpoint  POST /api/warehouse-selection
     // -----------------------------------------------------------------------
 
     /**
-     * POST /api/warehouse-selection
-     *
-     * Accepts a JSON body with an "items" array.
-     * Returns a 200 with a complete, partial, or unfulfillable decision.
-     * Returns a 422 for invalid input.
+     * Accepts a validated order, runs the warehouse-selection simulation,
+     * and returns a 200 with a complete/partial/unfulfillable recommendation.
+     * Returns 422 for invalid input, 500 for unexpected server errors.
+     * No inventory is modified — this is a read-only advisory operation.
      */
     public function select(WarehouseSelectionRequest $request): JsonResponse
     {
-        $orderItems = $this->normalizeItems($request->validated()['items']);
+        // Validation (product existence, quantities, duplicates) is handled
+        // entirely by WarehouseSelectionRequest.  By the time we reach here,
+        // the input is clean and contains no unknown or duplicate product codes.
+        $orderItems = $this->buildOrderItems($request->validated()['items']);
 
         try {
             $result = $this->selectionService->select($orderItems);
@@ -50,6 +53,7 @@ class WarehouseSelectionController extends Controller
                 'message' => $e->getMessage(),
                 'trace'   => $e->getTraceAsString(),
             ]);
+
             return response()->json([
                 'error'   => 'An unexpected error occurred while processing the order.',
                 'message' => app()->hasDebugModeEnabled() ? $e->getMessage() : null,
@@ -62,33 +66,21 @@ class WarehouseSelectionController extends Controller
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
+    // Private helpers
     // -----------------------------------------------------------------------
 
     /**
-     * Convert raw validated input into OrderItemDTOs.
-     * Duplicate product lines are merged by summing their quantities.
+     * Convert validated raw input into typed OrderItemDTOs.
+     * Input is already free of duplicates (rejected at validation layer).
      *
      * @param  array<int, array{product_id: string, quantity: int}>  $rawItems
      * @return OrderItemDTO[]
      */
-    private function normalizeItems(array $rawItems): array
+    private function buildOrderItems(array $rawItems): array
     {
-        $merged = [];
-        foreach ($rawItems as $raw) {
-            $code = $raw['product_id'];
-            $qty  = (int) $raw['quantity'];
-            if (isset($merged[$code])) {
-                $merged[$code] += $qty;
-            } else {
-                $merged[$code] = $qty;
-            }
-        }
-
         return array_map(
-            fn (string $code, int $qty) => new OrderItemDTO($code, $qty),
-            array_keys($merged),
-            array_values($merged),
+            fn (array $raw) => new OrderItemDTO($raw['product_id'], (int) $raw['quantity']),
+            $rawItems,
         );
     }
 }

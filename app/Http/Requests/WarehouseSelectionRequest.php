@@ -4,21 +4,25 @@ namespace App\Http\Requests;
 
 use App\Models\Product;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Support\Facades\Cache;
+use Illuminate\Validation\Rule;
 
 class WarehouseSelectionRequest extends FormRequest
 {
     public function authorize(): bool
     {
-        return true; // No authentication in this challenge
+        return true; // No authentication required for this application
     }
 
     public function rules(): array
     {
+        // Load valid product codes once for this request.
+        // A simple pluck on an indexed column — no need to cache it.
+        $validCodes = Product::pluck('code')->all();
+
         return [
-            'items'                  => ['required', 'array', 'min:1'],
-            'items.*.product_id'     => ['required', 'string'],
-            'items.*.quantity'       => ['required', 'integer', 'min:1', 'max:9999'],
+            'items'              => ['required', 'array', 'min:1'],
+            'items.*.product_id' => ['required', 'string', Rule::in($validCodes)],
+            'items.*.quantity'   => ['required', 'integer', 'min:1', 'max:9999'],
         ];
     }
 
@@ -30,6 +34,7 @@ class WarehouseSelectionRequest extends FormRequest
             'items.min'                   => 'At least one order item is required.',
             'items.*.product_id.required' => 'Each item must include a product_id.',
             'items.*.product_id.string'   => 'product_id must be a string (e.g. "P001").',
+            'items.*.product_id.in'       => 'The product_id ":input" does not exist. Valid codes are: P001–P005.',
             'items.*.quantity.required'   => 'Each item must include a quantity.',
             'items.*.quantity.integer'    => 'Quantity must be a whole number.',
             'items.*.quantity.min'        => 'Quantity must be at least 1.',
@@ -38,8 +43,9 @@ class WarehouseSelectionRequest extends FormRequest
     }
 
     /**
-     * After base validation, verify every product_id exists and detect
-     * duplicates.  Unknown product codes are flagged as validation errors.
+     * After base validation, detect duplicate product lines.
+     * The base rules above handle unknown product codes via Rule::in.
+     * Duplicates are flagged separately so the caller receives a clear message.
      */
     public function withValidator($validator): void
     {
@@ -50,9 +56,6 @@ class WarehouseSelectionRequest extends FormRequest
                 return;
             }
 
-            // Load all valid product codes once
-            $validCodes = Cache::remember('product_codes', 60, fn () => Product::pluck('code')->all());
-
             $seen = [];
             foreach ($items as $index => $item) {
                 $code = $item['product_id'] ?? null;
@@ -61,21 +64,13 @@ class WarehouseSelectionRequest extends FormRequest
                     continue; // Already caught by base rules
                 }
 
-                if (! in_array($code, $validCodes, true)) {
+                if (isset($seen[$code])) {
                     $validator->errors()->add(
                         "items.{$index}.product_id",
-                        "Product ID \"{$code}\" does not exist."
+                        "Duplicate product_id \"{$code}\". Submit each product once and combine quantities into a single line."
                     );
                 }
 
-                if (isset($seen[$code])) {
-                    // Duplicate — flag it; the service will normalize, but we
-                    // surface the duplicate so the caller is aware.
-                    $validator->errors()->add(
-                        "items.{$index}.product_id",
-                        "Duplicate product ID \"{$code}\". Combine quantities into a single line."
-                    );
-                }
                 $seen[$code] = true;
             }
         });

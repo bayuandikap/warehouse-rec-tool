@@ -49,7 +49,6 @@ class WarehouseSelectionApiTest extends TestCase
                                 '*' => [
                                     'product_code',
                                     'product_name',
-                                    'requested_quantity',
                                     'allocated_quantity',
                                 ],
                             ],

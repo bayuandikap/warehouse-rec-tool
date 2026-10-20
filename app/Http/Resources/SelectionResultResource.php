@@ -37,7 +37,6 @@ class SelectionResultResource extends JsonResource
                         fn (AllocationLineDTO $l) => [
                             'product_code'      => $l->productCode,
                             'product_name'      => $l->productName,
-                            'requested_quantity'=> $l->requestedQuantity,
                             'allocated_quantity'=> $l->allocatedQuantity,
                         ],
                         $w->lines

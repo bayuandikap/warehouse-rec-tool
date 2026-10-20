@@ -13,6 +13,8 @@ class InventorySeeder extends Seeder
     {
         // Initial inventory from challenge data.
         // Row = warehouse code, columns = [P001, P002, P003, P004, P005]
+        // Zero-quantity rows are skipped — they contribute nothing to allocation
+        // and would waste storage and query time.
         $data = [
             'W01' => ['P001' => 200, 'P002' => 0,  'P003' => 500, 'P004' => 0,  'P005' => 300],
             'W02' => ['P001' => 50,  'P002' => 30, 'P003' => 0,   'P004' => 20, 'P005' => 0],
@@ -31,6 +33,10 @@ class InventorySeeder extends Seeder
         foreach ($data as $warehouseCode => $products) {
             $warehouseId = $warehouseIds[$warehouseCode];
             foreach ($products as $productCode => $qty) {
+                if ($qty === 0) {
+                    continue; // Skip zero-stock rows — no allocation value
+                }
+
                 Inventory::updateOrCreate(
                     [
                         'warehouse_id' => $warehouseId,

@@ -360,7 +360,7 @@ PASS  Tests\Feature\WarehouseSelectionApiTest
   Γ£ô explanations are present on complete result
   Γ£ô index page returns 200
 
-Tests: 38 passed (135 assertions)
+Tests: 42 passed (151 assertions)
 ```
 
 ---

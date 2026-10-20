@@ -120,14 +120,20 @@ class WarehouseSelectionService
 
     /**
      * Load all products, warehouses, and inventories in exactly three queries.
+     * Only non-zero inventory rows are loaded — zero-stock rows contribute
+     * nothing to allocation and would needlessly bloat the virtual inventory map.
      *
      * @return array{Collection, Collection, Collection}
      */
     private function loadData(): array
     {
-        $products   = Product::all();
-        $warehouses = Warehouse::orderBy('distance_km')->get();
-        $inventories = Inventory::all();
+        $products    = Product::select(['id', 'code', 'name', 'category', 'requires_refrigeration'])->get();
+        $warehouses  = Warehouse::select(['id', 'code', 'city', 'distance_km', 'has_cold_storage', 'has_refrigerated_delivery'])
+                                ->orderBy('distance_km')
+                                ->get();
+        $inventories = Inventory::select(['warehouse_id', 'product_id', 'quantity'])
+                                ->where('quantity', '>', 0)
+                                ->get();
 
         return [$products, $warehouses, $inventories];
     }
@@ -195,11 +201,11 @@ class WarehouseSelectionService
             $virtualInventory[$warehouse->id][$product->id] -= $take;
             $remaining -= $take;
 
-            // Record the allocation line
+            // Record the allocation line (only the warehouse's contribution,
+            // not the full order quantity — see AllocationLineDTO docblock).
             $line = new AllocationLineDTO(
                 productCode:       $product->code,
                 productName:       $product->name,
-                requestedQuantity: $item->quantity,
                 allocatedQuantity: $take,
             );
 
