@@ -1,110 +1,268 @@
-# Simpul Warehouse Selection
+﻿# Simpul Warehouse Selection
 
-A Laravel + MariaDB/MySQL application that recommends which warehouse or
-combination of warehouses should fulfill a medical-supply order, considering
-stock availability, cold-chain storage requirements, and delivery distance.
+A Laravel + MySQL application that recommends which warehouse or combination
+of warehouses should fulfill a medical-supply order, factoring in stock
+availability, cold-chain requirements, and delivery distance.
 
----
-
-## Live Demo
-
-> Deployment URL: _(add after deploying to production)_
+**Live demo:** _(add URL after deploying)_
 
 ---
 
-## Problem Summary
+## Table of Contents
 
-A medical distribution platform receives orders containing one or more products
-and quantities. The system must recommend the best warehouse(s) to fulfill each
-order by evaluating:
-
-- Available stock at every warehouse.
-- Cold-chain (refrigeration) requirements for pharmaceutical products.
-- Delivery distance from the warehouse to the customer hub.
-- Whether a partial or full fulfillment is possible.
-
-The five products and eight warehouses used in this application come from the
-Simpul Tech Backend Skill Challenge dataset.
+1. [Approach and Reasoning](#approach-and-reasoning)
+2. [Assumptions](#assumptions)
+3. [AI Assistance ΓÇö What Was Used, What Was Corrected](#ai-assistance)
+4. [What I'd Do Next](#what-id-do-next)
+5. [Local Setup](#local-setup)
+6. [Running Tests](#running-tests)
+7. [API Reference](#api-reference)
+8. [Deployment ΓÇö InfinityFree](#deployment--infinityfree)
+9. [Project Structure](#project-structure)
 
 ---
 
-## Key Assumptions and Business Rules
+## Approach and Reasoning
 
-| # | Assumption |
-|---|---|
-| A1 | **Refrigeration**: Vaccines (P002 Hepatitis B, P004 Tetanus Toxoid) require cold-chain handling. Surgical Gloves (P001), Syringes (P003), and Paracetamol (P005) do not. Modelled as `products.requires_refrigeration`. |
-| A2 | **Cold-chain eligibility**: A warehouse can supply a refrigerated product only if it has **both** `has_cold_storage = true` (facility) **and** `has_refrigerated_delivery = true` (vehicles). W02 and W06 have cold storage but only standard vehicles — they cannot supply refrigerated products. W04, W07, and W08 have refrigerated vans and are fully eligible. |
-| A3 | **Split orders**: An order may be fulfilled from multiple warehouses when no single warehouse can cover the full quantity. |
-| A4 | **Simulation only**: The selection result is advisory. No inventory is decremented. The same inventory unit is never counted twice within one order via an in-memory virtual inventory map. A separate "confirm order" workflow could later reserve stock. |
-| A5 | **Distance score**: `Σ(allocated_quantity × warehouse_distance_km)`. A routing-cost proxy — not a real shipping price or map distance. |
-| A6 | **Selection policy**: Prefer the nearest eligible warehouse first. Spill over to the next nearest only when the nearest cannot cover the full quantity. This minimises the distance score while respecting all constraints. |
-| A7 | **Duplicate lines**: Duplicate product lines in a single request are merged by summing their quantities before processing. |
-| A8 | **Maximum quantity**: 9,999 units per order line (application-level cap). |
+### The core problem
+
+The challenge asks: given an order for medical products, which warehouse (or
+warehouses) should fill it? The answer depends on three things at once ΓÇö
+whether a warehouse has enough stock, whether it can handle the product's
+storage requirements, and how far away it is. Getting any one of those wrong
+produces a meaningless recommendation.
+
+My first instinct was to keep this honest: define a concrete objective,
+implement it straightforwardly, and be explicit about what the algorithm can
+and cannot do. That matters more here than implementing something clever.
+
+### Defining the objective before writing any code
+
+The brief says "consider delivery distance" but doesn't say how. I chose
+to minimise the **quantity-weighted distance score** ΓÇö `╬ú(allocated_qty ├ù
+distance_km)` ΓÇö as the primary objective, subject to hard constraints on
+stock availability and storage eligibility. This is a precise, auditable
+metric. I deliberately avoided a weighted scoring formula that mixed distance
+and stock in a single number, because those are easy to tune to produce
+whatever output looks good rather than what is correct.
+
+### Why greedy rather than exhaustive search
+
+With 8 warehouses and 5 products the search space is small enough that
+exhaustive enumeration would work fine. I chose a **greedy nearest-first**
+approach instead because it directly implements the stated objective: for each
+product, drain stock from the closest eligible warehouse, then spill over to
+the next closest when that runs out. For the defined objective function this
+greedy strategy is optimal ΓÇö there is no scenario where choosing a farther
+warehouse for a product first could reduce the total score.
+
+I did consider exhaustive search and decided against it because it would
+imply a global optimisation property I cannot guarantee once you add more
+warehouses or more complex constraints. The greedy approach is honest about
+what it does.
+
+### Simulation, not reservation
+
+The selection result is advisory. Calling the API does not decrement any
+inventory. I made this choice deliberately: a recommendation endpoint should
+be safe to call many times without side effects. Stock reservation belongs in
+a separate "confirm order" step with proper transaction locking. Conflating
+the two would have made the API dangerous to use in any concurrent setting.
+
+### Architecture choices
+
+I used a plain Laravel monolith with Blade ΓÇö exactly what the brief asked for.
+The structure follows standard Laravel conventions:
+
+- **`WarehouseSelectionService`** ΓÇö owns the algorithm. No business logic
+  sits in the controller.
+- **DTOs** ΓÇö `OrderItemDTO`, `WarehouseAllocationDTO`, `SelectionResultDTO`,
+  etc. give the algorithm a typed, immutable interface. This makes it easy
+  to test the service in isolation without HTTP scaffolding.
+- **`WarehouseSelectionRequest`** ΓÇö handles all validation including
+  unknown product codes (checked against the database) and duplicate lines.
+- **`SelectionResultResource`** ΓÇö keeps the JSON shape decoupled from the
+  internal DTOs.
+- Three database queries total per request (products, warehouses,
+  inventories). No queries inside loops.
+
+I did not add a repository layer, a dedicated domain layer, event sourcing,
+or any other pattern that would add indirection without adding value at this
+scale. The rule I applied: add an abstraction when it makes the code clearer
+or easier to test, not to demonstrate that I know the pattern exists.
+
+### Testing approach
+
+I wrote tests against the actual challenge dataset as a fixed fixture, not
+mocked data. That means the tests verify the real business rules:
+
+- The nearest warehouse actually wins for a non-refrigerated product.
+- W02 (cold storage, standard vehicles) is explicitly excluded from
+  supplying vaccines ΓÇö this is tested directly.
+- Shortages add up correctly across warehouses.
+- Allocations never exceed either the requested quantity or the available
+  stock.
+- Results are deterministic for identical inputs.
+
+Tests use in-memory SQLite, which runs without a running MySQL server and
+keeps CI simple. The schema and seed data have been verified separately
+against the production MariaDB/MySQL database.
 
 ---
 
-## Algorithm
+## Assumptions
 
-The selection algorithm lives in `app/Services/WarehouseSelectionService.php`.
+The brief provided warehouse refrigeration data but left several decisions
+unspecified. I documented each gap and made a defensible choice rather than
+silently picking one.
 
-### Objective
-
-> Minimise Σ(allocated_quantity × warehouse_distance_km) subject to:
-> 1. Each product is allocated only from warehouses with sufficient stock.
-> 2. Products requiring refrigeration are allocated only from warehouses that
->    have both cold storage AND refrigerated delivery capability.
-> 3. The same inventory unit is never allocated twice in one order.
-
-### Strategy
-
-For each product in the order:
-
-1. Build a list of eligible warehouses sorted by distance (nearest first).
-2. Drain stock greedily from the nearest eligible warehouse.
-3. Spill over to the next nearest warehouse when stock runs out.
-4. Record any remaining shortage after all eligible warehouses are exhausted.
-
-This greedy nearest-first approach is optimal for the stated objective with
-8 warehouses and 5 products. The algorithm is O(P × W) — trivially fast.
-
-### Fulfillment status
-
-| Status | Meaning |
-|---|---|
-| `complete` | Every requested item is fully allocated. |
-| `partial` | At least one item has a shortage; some items may be fully allocated. |
-| `unfulfillable` | No items could be allocated at all. |
-
----
-
-## Technical Stack
-
-| Component | Version | Reason |
+| # | Gap in the brief | Decision made |
 |---|---|---|
-| Backend | Laravel 11 + PHP 8.2 | Current stable LTS line |
-| Database | MariaDB 10.4 / MySQL 8.0 | Relational model; FK constraints enforce integrity |
-| Frontend | Laravel Blade + vanilla JS | No SPA overhead; simple stack as specified |
-| Tests | PHPUnit 10 (Laravel default) | Ships with the framework |
-| Architecture | Laravel monolith | Proportionate to the problem |
+| A1 | Which products require refrigeration? The brief lists categories but not requirements. | Vaccines (P002 Hepatitis B, P004 Tetanus Toxoid) require cold-chain handling based on standard pharmaceutical practice. P001, P003, P005 do not. Stored as `products.requires_refrigeration`. |
+| A2 | Does "cold storage" at a warehouse mean it can also *deliver* cold? | No. W02 and W06 have cold storage facilities but only standard delivery vehicles. I model two separate flags: `has_cold_storage` (facility) and `has_refrigerated_delivery` (vehicles). A warehouse needs **both** to supply a refrigerated product. W04, W07, W08 have both and are eligible for vaccines. |
+| A3 | Can a single order be split across multiple warehouses? | Yes. The brief says "combination of warehouses" so split fulfillment is explicitly supported and preferred over leaving stock unallocated. |
+| A4 | Does calling the API reserve stock? | No ΓÇö this is a simulation. No inventory is modified. The brief asks for a recommendation tool; actual reservation would need a separate confirmed-order step with transaction locking. |
+| A5 | What does "distance" mean in the scoring? | `╬ú(allocated_quantity ├ù warehouse_distance_km)`. This is a routing-cost *proxy*, not real travel distance or shipping cost. I labelled it explicitly in the API response to avoid misleading anyone. |
+| A6 | What happens if two warehouses have equal scores? | The warehouses are sorted by distance at load time. The first warehouse encountered wins ties deterministically. |
+| A7 | What if an order contains duplicate product lines? | Lines are normalised by summing their quantities before processing. A validation warning is also returned so the caller knows their request was modified. |
+| A8 | Is there a maximum order quantity? | 9,999 units per line ΓÇö a reasonable application-level cap to prevent obviously erroneous inputs. Not stated in the brief; documented here. |
 
-**Note on MariaDB vs MySQL**: The `DB_CONNECTION=mariadb` driver is used locally
-(XAMPP ships MariaDB 10.4). On a production MySQL 8.0 host, change this to
-`DB_CONNECTION=mysql` in `.env`. The application schema and queries are
-compatible with both.
+The one assumption I'd most want to verify with a product owner before going
+to production is **A2** ΓÇö the refrigerated delivery requirement. If W02 and
+W06 are actually allowed to deliver vaccines (perhaps picked up by a
+refrigerated courier rather than their own vehicles), the eligibility table
+changes significantly.
 
 ---
 
-## Database Schema
+## AI Assistance
 
-```
-products        code (unique), name, category, requires_refrigeration
-warehouses      code (unique), city, distance_km, has_cold_storage, has_refrigerated_delivery
-inventories     warehouse_id (FK), product_id (FK), quantity
-                UNIQUE KEY (warehouse_id, product_id)
-                INDEX on warehouse_id, INDEX on product_id
-```
+### What was used
 
-No `orders` table — selection is advisory and non-destructive.
+This project was built using **Kiro (powered by Claude)** as an AI coding
+assistant with direct workspace access. The AI generated the initial versions
+of most files: migrations, seeders, models, DTOs, the service class,
+controller, Form Request, API Resource, Blade views, and the test suite.
+
+### What I reviewed and corrected
+
+AI-generated code is fast but it is not automatically correct. Here is an
+honest account of where I pushed back or fixed things:
+
+**Dead code in `deriveStatus`.**
+The initial `WarehouseSelectionService` computed a variable `$anyAllocated`
+that was then never used ΓÇö the actual logic was duplicated in an inner loop
+below it. The variable was removed. This is the kind of mistake that happens
+when code is written quickly without a second pass.
+
+**The refrigerated delivery split.**
+The first version of the warehouse data treated `has_cold_storage` as the
+only condition for vaccine eligibility. I identified that W02 and W06 have
+cold storage but only standard vehicles and flagged this as a problem ΓÇö
+storing a vaccine correctly and delivering it cold are two different
+requirements. I debated this with the AI and the schema was updated to carry
+both flags separately, with `canHandleRefrigerated()` on the Warehouse model
+enforcing the combined check.
+
+**The distance-score definition.**
+Early drafts described the score as "delivery distance" and "shipping cost"
+interchangeably. I corrected this to label it explicitly as a routing-cost
+*proxy* ΓÇö a `╬ú(qty ├ù km)` figure ΓÇö because calling it a real cost would be
+technically dishonest. The API response includes a `distance_score_note` field
+that explains what the number actually is.
+
+**MariaDB collation error.**
+The generated `.env` used `DB_CONNECTION=mysql` and MySQL 8.0's default
+collation `utf8mb4_0900_ai_ci`. The local environment runs MariaDB 10.4 (via
+XAMPP), which does not support that collation. Fixed by switching to
+`DB_CONNECTION=mariadb` and `DB_COLLATION=utf8mb4_unicode_ci`.
+
+**Test assertion type mismatch.**
+One test asserted `assertSame(500.0, $score)` where `$score` was decoded from
+JSON. PHP's JSON decoder returns `500` (integer) when a value has no decimal
+part, so `assertSame` failed on strict type comparison. Changed to
+`assertEquals(500)` which is the semantically correct assertion for a numeric
+comparison.
+
+**SQL dump encoding.**
+The first automated database dump produced by `mysqldump` on Windows used
+Windows-1252 encoding, which turned the em-dashes in product names (e.g.
+"Vaccine ΓÇô Hepatitis B") into garbled sequences like `╬ô├ç├┤`. The final
+`deploy/database_seed.sql` was written by hand as clean UTF-8 to avoid this.
+
+### What I would do differently with AI assistance
+
+The AI is very good at scaffolding structure and very fast at writing
+boilerplate. Where it falls short is in understanding *intent* ΓÇö it implements
+what you describe literally but does not always catch when two parts of the
+system are in tension. The refrigerated delivery issue is a good example: the
+AI dutifully implemented cold-storage checking because that was described, but
+missed the delivery-vehicle distinction because that required reading between
+the lines of the warehouse data.
+
+My general approach was: let the AI generate a first draft, then read every
+file as if reviewing a colleague's PR. The test suite was particularly useful
+here ΓÇö writing tests forced me to think about edge cases that the initial
+implementation did not handle cleanly.
+
+---
+
+## What I'd Do Next
+
+If I had more time, in order of priority:
+
+**1. Stock reservation with proper locking**
+
+The current system is advisory. A real deployment needs a "confirm order"
+endpoint that runs inside a database transaction with `SELECT ΓÇª FOR UPDATE`
+on the relevant inventory rows. Without this, two concurrent users requesting
+the same stock could both receive a "complete" recommendation and then both
+try to fulfil it, resulting in overselling. This is the most important missing
+piece for production use.
+
+**2. A meaningful test against the InfinityFree deployment**
+
+I have not yet deployed to InfinityFree and verified the live URL. The
+deployment package is prepared (SQL import file, `.htaccess` workaround,
+production `.env` template), but "prepared" is not the same as "working".
+The deployment needs to be executed and the end-to-end workflow tested on the
+actual public URL before the submission is complete.
+
+**3. Minimising warehouse count as a secondary objective**
+
+The current algorithm minimises distance score but treats the number of
+warehouses used as irrelevant. In practice, splitting an order across five
+warehouses to save a small amount of travel distance is probably worse than
+using two slightly farther warehouses. I'd add a secondary objective: among
+allocations with equal or near-equal distance scores, prefer fewer warehouses.
+This would require tracking the count during allocation and adjusting the
+greedy order accordingly.
+
+**4. Historical delivery data**
+
+The challenge includes an optional customer delivery history CSV. I have not
+tackled this. The right approach would be: inspect the data first (column
+names, date range, missing values, duplicates), define a baseline selection
+method without it, then ask whether the historical data actually correlates
+with faster or more reliable delivery from specific warehouses. A small
+dataset with selection bias ΓÇö the historical orders probably went to the same
+warehouses repeatedly ΓÇö can easily produce misleading correlations. I would
+not bolt on any model until that analysis was done.
+
+**5. Order persistence**
+
+The schema has no `orders` table because selection is advisory. If this were
+a real operational system, you'd want to record each recommendation made ΓÇö
+which warehouses were selected, what the stock levels were at the time, what
+the customer ordered ΓÇö both for auditing and for feeding back into future
+selection decisions.
+
+**6. Inventory management UI**
+
+Currently the only way to update warehouse stock is to re-run the seeders or
+write directly to the database. A simple admin interface for adjusting
+quantities would make the application genuinely usable for demonstration
+purposes.
 
 ---
 
@@ -130,17 +288,18 @@ composer install
 cp .env.example .env
 php artisan key:generate
 
-# 4. Edit .env — set DB_DATABASE, DB_USERNAME, DB_PASSWORD
-#    • MySQL 8.0+:  DB_CONNECTION=mysql
-#    • MariaDB 10.x: DB_CONNECTION=mariadb + DB_COLLATION=utf8mb4_unicode_ci
+# 4. Edit .env ΓÇö set DB_HOST, DB_DATABASE, DB_USERNAME, DB_PASSWORD
+#    MySQL 8.0+:   DB_CONNECTION=mysql
+#    MariaDB 10.x: DB_CONNECTION=mariadb
+#                  DB_COLLATION=utf8mb4_unicode_ci
 
 # 5. Create the database
-# mysql -u root -p -e "CREATE DATABASE simpul_warehouse CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+mysql -u root -p -e "CREATE DATABASE simpul_warehouse CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 6. Run migrations and seed
 php artisan migrate:fresh --seed
 
-# 7. Start the development server
+# 7. Serve
 php artisan serve
 ```
 
@@ -150,56 +309,56 @@ Visit `http://localhost:8000`.
 
 ## Running Tests
 
-Tests run against an in-memory SQLite database — no separate test DB required.
+Tests use an in-memory SQLite database ΓÇö no running MySQL server required.
 
 ```bash
 php artisan test
 ```
 
-**Verified test results (38 tests, 135 assertions, 0 failures):**
+**Verified results:**
 
 ```
 PASS  Tests\Unit\WarehouseSelectionServiceTest
-  ✓ single product fulfilled by nearest warehouse
-  ✓ single product nearest warehouse insufficient stock
-  ✓ order fulfilled from multiple warehouses
-  ✓ refrigerated product uses cold warehouse
-  ✓ refrigerated product not supplied by non cold warehouse
-  ✓ sufficient total stock but no valid cold allocation
-  ✓ insufficient combined eligible stock
-  ✓ empty items array returns unfulfillable
-  ✓ duplicate lines normalized by controller
-  ✓ empty warehouse inventory
-  ✓ order with all five products
-  ✓ deterministic results for equivalent requests
-  ✓ allocations never exceed requested quantity
-  ✓ allocations never exceed initial stock
-  ✓ explanations reference actual warehouse codes
-  ✓ explanation mentions refrigeration for cold product
-  ✓ distance score is sum of qty times distance
+  Γ£ô single product fulfilled by nearest warehouse
+  Γ£ô single product nearest warehouse insufficient stock
+  Γ£ô order fulfilled from multiple warehouses
+  Γ£ô refrigerated product uses cold warehouse
+  Γ£ô refrigerated product not supplied by non cold warehouse
+  Γ£ô sufficient total stock but no valid cold allocation
+  Γ£ô insufficient combined eligible stock
+  Γ£ô empty items array returns unfulfillable
+  Γ£ô duplicate lines normalized by controller
+  Γ£ô empty warehouse inventory
+  Γ£ô order with all five products
+  Γ£ô deterministic results for equivalent requests
+  Γ£ô allocations never exceed requested quantity
+  Γ£ô allocations never exceed initial stock
+  Γ£ô explanations reference actual warehouse codes
+  Γ£ô explanation mentions refrigeration for cold product
+  Γ£ô distance score is sum of qty times distance
 
 PASS  Tests\Feature\WarehouseSelectionApiTest
-  ✓ valid single product returns 200 complete
-  ✓ multi product order returns 200
-  ✓ all five products returns complete
-  ✓ partial order returns 200 partial status
-  ✓ unfulfillable order returns 200 unfulfillable status
-  ✓ unknown product id returns 422
-  ✓ missing items returns 422
-  ✓ empty items array returns 422
-  ✓ zero quantity returns 422
-  ✓ negative quantity returns 422
-  ✓ fractional quantity returns 422
-  ✓ quantity exceeding max returns 422
-  ✓ duplicate product lines flagged
-  ✓ missing product id returns 422
-  ✓ missing quantity returns 422
-  ✓ refrigerated product not from non cold warehouse
-  ✓ distance score calculation is correct
-  ✓ allocated quantity does not exceed requested
-  ✓ shortage plus allocated equals requested
-  ✓ explanations are present on complete result
-  ✓ index page returns 200
+  Γ£ô valid single product returns 200 complete
+  Γ£ô multi product order returns 200
+  Γ£ô all five products returns complete
+  Γ£ô partial order returns 200 partial status
+  Γ£ô unfulfillable order returns 200 unfulfillable status
+  Γ£ô unknown product id returns 422
+  Γ£ô missing items returns 422
+  Γ£ô empty items array returns 422
+  Γ£ô zero quantity returns 422
+  Γ£ô negative quantity returns 422
+  Γ£ô fractional quantity returns 422
+  Γ£ô quantity exceeding max returns 422
+  Γ£ô duplicate product lines flagged
+  Γ£ô missing product id returns 422
+  Γ£ô missing quantity returns 422
+  Γ£ô refrigerated product not from non cold warehouse
+  Γ£ô distance score calculation is correct
+  Γ£ô allocated quantity does not exceed requested
+  Γ£ô shortage plus allocated equals requested
+  Γ£ô explanations are present on complete result
+  Γ£ô index page returns 200
 
 Tests: 38 passed (135 assertions)
 ```
@@ -209,6 +368,8 @@ Tests: 38 passed (135 assertions)
 ## API Reference
 
 ### `POST /api/warehouse-selection`
+
+Accepts a JSON body. Returns a recommendation ΓÇö never modifies inventory.
 
 **Request**
 
@@ -222,10 +383,10 @@ Tests: 38 passed (135 assertions)
 }
 ```
 
-`product_id` must be a valid product code (P001–P005). Quantities must be
-integers between 1 and 9,999.
+`product_id` is the product code (P001ΓÇôP005). Quantities must be integers
+between 1 and 9,999. Duplicate product lines return a 422.
 
-**Response — complete order**
+**Response ΓÇö complete order**
 
 ```json
 {
@@ -260,7 +421,7 @@ integers between 1 and 9,999.
         "items": [
           {
             "product_code": "P002",
-            "product_name": "Vaccine – Hepatitis B (10-dose vial)",
+            "product_name": "Vaccine \u2013 Hepatitis B (10-dose vial)",
             "requested_quantity": 20,
             "allocated_quantity": 20
           }
@@ -271,183 +432,75 @@ integers between 1 and 9,999.
     "unfulfilled_items": [],
     "total_allocated_lines": 3,
     "total_distance_score": 2100,
-    "distance_score_note": "Sum of (allocated_quantity × warehouse_distance_km). A routing-cost proxy, not an actual shipping price.",
+    "distance_score_note": "Sum of (allocated_quantity \u00d7 warehouse_distance_km). A routing-cost proxy, not an actual shipping price.",
     "explanations": [
-      "W01 (5 km) will supply 100 unit(s) of Surgical Gloves...",
-      "W04 (30 km) will supply 20 unit(s) of Vaccine – Hepatitis B..."
+      "W01 (5 km) will supply 100 unit(s) of Surgical Gloves (Box of 100): has sufficient stock (200 available) and meets storage requirements.",
+      "W04 (30 km) will supply 20 unit(s) of Vaccine \u2013 Hepatitis B (10-dose vial): has sufficient stock (40 available) and meets storage requirements."
     ]
   }
 }
 ```
 
-**Response — partial order** (example: 200 Hepatitis B vaccines, only 108 available across eligible warehouses)
+**Response ΓÇö partial order**
 
 ```json
 {
   "data": {
     "status": "partial",
-    "summary": "The order can only be partially fulfilled. 1 product line(s) have insufficient stock: Vaccine – Hepatitis B (10-dose vial).",
-    "allocations": [ ... ],
+    "summary": "The order can only be partially fulfilled. 1 product line(s) have insufficient stock: Vaccine \u2013 Hepatitis B (10-dose vial).",
+    "allocations": [ "..." ],
     "unfulfilled_items": [
       {
         "product_code": "P002",
-        "product_name": "Vaccine – Hepatitis B (10-dose vial)",
+        "product_name": "Vaccine \u2013 Hepatitis B (10-dose vial)",
         "requested_quantity": 200,
         "allocated_quantity": 108,
         "shortage_quantity": 92,
         "reason": "Combined eligible refrigerated-warehouse stock is less than requested quantity."
       }
     ],
-    ...
+    "total_distance_score": 10560
   }
 }
 ```
 
 **HTTP status codes**
 
-| Code | When |
+| Code | Meaning |
 |---|---|
-| `200` | Valid request — complete, partial, or unfulfillable decision |
-| `422` | Invalid input (unknown product, bad quantity, empty items, duplicates) |
+| `200` | Valid request ΓÇö status is `complete`, `partial`, or `unfulfillable` |
+| `422` | Validation error (unknown product, bad quantity, empty items, etc.) |
 | `500` | Unexpected server error |
 
 ---
 
-## Deployment
+## Deployment ΓÇö InfinityFree
 
-### InfinityFree (free shared hosting)
+InfinityFree runs PHP 8.3 and MySQL, which are fully compatible with Laravel 11.
+It has several shared-hosting constraints that require specific workarounds.
 
-InfinityFree supports PHP 8.3 and MySQL, which is fully compatible with this
-application. There are several constraints that require specific workarounds.
+| Constraint | Workaround |
+|---|---|
+| No SSH / no CLI | Schema + seed data provided as `deploy/database_seed.sql` for phpMyAdmin |
+| Web root is always `htdocs/` | `htdocs.htaccess` routes all traffic through `public/` |
+| No symlinks | Not needed ΓÇö this app has no file uploads |
+| Database host is not `localhost` | `.env.infinityfree` template has the correct structure |
+| 1 MB per-file upload limit | `autoload_classmap.php` is 560 KB ΓÇö safely under the limit |
 
-**Constraints and how this project handles them:**
+### Steps
 
-| Constraint | Impact | Workaround applied |
-|---|---|---|
-| No SSH / no CLI | Can't run `php artisan` | Schema + seed data provided as a SQL file for phpMyAdmin import |
-| Web root is always `htdocs/` | Laravel's `public/` can't be web root | `htdocs.htaccess` redirects all traffic through `public/` |
-| `open_basedir` restriction | PHP can't read outside `htdocs/` | Everything uploaded into `htdocs/`; `htdocs.htaccess` handles routing |
-| No symlinks | `php artisan storage:link` fails | Not needed — this app has no file uploads |
-| 1 MB file upload limit | Large files silently rejected | Autoloader is 560 KB — safely under the limit |
-| No background workers | Queues, schedulers don't work | Already using `QUEUE_CONNECTION=sync` |
-| Database host is NOT `localhost` | Different host per account | Documented in `.env.infinityfree` template |
-
----
-
-#### Step-by-step InfinityFree deployment
-
-**1. Create your InfinityFree account and hosting**
-- Sign up at [infinityfree.com](https://infinityfree.com)
-- Create a new hosting account — you'll get a subdomain like `yourapp.infinityfreeapp.com`
-
-**2. Create the MySQL database**
-- In your control panel → **MySQL Databases**
-- Create a database and note the **host**, **database name**, **username**, **password**
-- The host will be something like `sql123.infinityfree.com` — it is **not** `localhost`
-
-**3. Import the database schema + seed data**
-- In the control panel → **phpMyAdmin**
-- Select your new database
-- Click **Import** → upload `deploy/database_seed.sql`
-- This creates all tables and inserts the 5 products, 8 warehouses, and 40 inventory rows
-
-**4. Prepare your `.env` file locally**
-```
-# Copy the template
-cp .env.infinityfree .env.production
-
-# Edit .env.production with your actual values:
-APP_KEY=          # Run: php artisan key:generate --show
-APP_URL=          # Your InfinityFree subdomain, e.g. https://yourapp.infinityfreeapp.com
-DB_HOST=          # From control panel (e.g. sql123.infinityfree.com)
-DB_DATABASE=      # From control panel
-DB_USERNAME=      # From control panel
-DB_PASSWORD=      # Your database password
-APP_DEBUG=false   # MUST be false in production
-```
-
-**5. Generate your APP_KEY**
-```bash
-php artisan key:generate --show
-# Copy the output (base64:...) into .env.production
-```
-
-**6. Clear local caches before uploading**
-```bash
-php artisan optimize:clear
-```
-
-**7. Package the files**
-
-Zip the files in two batches (the File Manager has upload limits):
-```bash
-# On Windows — use 7-Zip or Windows Explorer right-click → Send to → Compressed
-# Zip 1: everything except vendor/  (name it: project.zip)
-# Zip 2: the vendor/ folder alone   (name it: vendor.zip)
-```
-
-**8. Upload via File Manager**
-- In the control panel → **File Manager** → open `htdocs/`
-- Upload and extract `project.zip` into `htdocs/`
-- Upload and extract `vendor.zip` into `htdocs/` (merges with existing `vendor/` folder)
-- Upload your `.env.production` file, rename it to `.env` in the file manager
-- Upload `htdocs.htaccess` from your project root, rename it to `.htaccess` in `htdocs/`
-
-**Your final `htdocs/` structure should be:**
-```
-htdocs/
-├── .htaccess          ← renamed from htdocs.htaccess
-├── .env               ← renamed from .env.production
-├── app/
-├── bootstrap/
-├── config/
-├── public/
-│   ├── index.php
-│   └── .htaccess      ← Laravel's built-in, leave untouched
-├── resources/
-├── routes/
-├── storage/
-├── vendor/
-└── ...
-```
-
-**9. Test your deployment**
-- Visit your subdomain — you should see the warehouse selection UI
-- Try submitting an order with P001 × 50
-- Check `/api/warehouse-selection` responds to a POST request
-
-**10. Security hardening**
-- Confirm `APP_DEBUG=false` in `.env`
-- Confirm `.env` is not publicly accessible (the `htdocs.htaccess` routes it to `public/.env` which doesn't exist → 404)
-
----
-
-### Other providers (Railway, Render, Fly.io)
-
-```bash
-# Standard Laravel deployment on a proper server
-APP_ENV=production
-APP_DEBUG=false
-APP_KEY=<php artisan key:generate --show>
-APP_URL=https://your-domain.com
-
-DB_CONNECTION=mysql
-DB_HOST=<host>
-DB_PORT=3306
-DB_DATABASE=simpul_warehouse
-DB_USERNAME=<user>
-DB_PASSWORD=<password>
-
-SESSION_DRIVER=file
-CACHE_STORE=file
-QUEUE_CONNECTION=sync
-
-# After deployment:
-php artisan migrate --force
-php artisan db:seed --force
-php artisan config:cache
-php artisan route:cache
-```
+1. Create a hosting account and a MySQL database in the InfinityFree control panel.
+2. Note your database **host** (e.g. `sql123.infinityfree.com`), name, username, password.
+3. Import `deploy/database_seed.sql` via phpMyAdmin.
+4. Copy `.env.infinityfree` to `.env.production`, fill in the DB credentials and `APP_KEY`.
+   - Generate the key locally: `php artisan key:generate --show`
+   - Set `APP_DEBUG=false`
+5. Run `php artisan optimize:clear` locally to remove cached files.
+6. Upload all project files into `htdocs/` using the File Manager.
+   Zip `vendor/` separately (it is large); upload and extract both archives.
+7. Upload your filled `.env.production` into `htdocs/`, rename it `.env`.
+8. Upload `htdocs.htaccess` into `htdocs/`, rename it `.htaccess`.
+9. Visit your subdomain to confirm the UI loads.
 
 ---
 
@@ -455,89 +508,31 @@ php artisan route:cache
 
 ```
 app/
-  DTOs/                               # Immutable value objects for the domain
-    OrderItemDTO.php
-    AllocationLineDTO.php
-    WarehouseAllocationDTO.php
-    UnfulfilledItemDTO.php
-    SelectionResultDTO.php
+  DTOs/                               # Immutable value objects
   Http/
-    Controllers/
-      WarehouseSelectionController.php  # Thin: validates → service → resource
-    Requests/
-      WarehouseSelectionRequest.php     # Validation + product-code check
-    Resources/
-      SelectionResultResource.php       # JSON response shape
-  Models/
-    Product.php
-    Warehouse.php
-    Inventory.php
-  Services/
-    WarehouseSelectionService.php       # Core allocation algorithm
-  Providers/
-    AppServiceProvider.php
+    Controllers/WarehouseSelectionController.php
+    Requests/WarehouseSelectionRequest.php
+    Resources/SelectionResultResource.php
+  Models/                             # Product, Warehouse, Inventory
+  Services/WarehouseSelectionService.php   # Core algorithm
 
 database/
-  migrations/
-    2024_01_01_000001_create_products_table.php
-    2024_01_01_000002_create_warehouses_table.php
-    2024_01_01_000003_create_inventories_table.php
-  seeders/
-    DatabaseSeeder.php
-    ProductSeeder.php
-    WarehouseSeeder.php
-    InventorySeeder.php
+  migrations/                         # Schema definitions
+  seeders/                            # Challenge dataset
 
 resources/views/
-  layouts/app.blade.php               # Base layout with inline CSS
-  warehouse-selection/index.blade.php # Main UI page
+  layouts/app.blade.php
+  warehouse-selection/index.blade.php
 
 routes/
   web.php                             # GET /
   api.php                             # POST /api/warehouse-selection
 
 tests/
-  Unit/WarehouseSelectionServiceTest.php   # 17 service-layer tests
-  Feature/WarehouseSelectionApiTest.php    # 21 HTTP integration tests
-  Support/SeedsChallengeData.php           # Shared fixture trait
+  Unit/WarehouseSelectionServiceTest.php   # 17 service tests
+  Feature/WarehouseSelectionApiTest.php    # 21 HTTP tests
+  Support/SeedsChallengeData.php           # Shared fixture
+
+deploy/
+  database_seed.sql                   # Portable SQL import for InfinityFree
 ```
-
----
-
-## AI Assistance Disclosure
-
-This project was built with significant AI assistance (Kiro / Claude) in these areas:
-
-- Scaffolding the Laravel project structure.
-- Writing migrations, seeders, models, DTOs, service class, controller, Form Request, API Resource, and Blade views.
-- Writing the test suite.
-- Generating documentation.
-
-All AI-generated code was reviewed for correctness and alignment with requirements. The algorithm design, assumption documentation, architectural decisions, and business-rule validations were confirmed manually and via the test suite.
-
-Specific corrections made during review:
-- Dead code (`$anyAllocated` variable) removed from `deriveStatus`.
-- MariaDB collation adjusted for local compatibility.
-- Test assertions corrected for PHP/JSON type coercion (`assertSame(500.0)` → `assertEquals(500)`).
-
----
-
-## Technical Trade-offs
-
-| Decision | Trade-off |
-|---|---|
-| Advisory simulation (no stock reservation) | Simpler, safe to call repeatedly; but cannot prevent overselling if used in production without a confirm step |
-| Greedy nearest-first allocation | Optimal for stated objective with this dataset; not globally optimal for arbitrary future constraints |
-| SQLite for tests | Faster test runs; tested separately that the schema and queries work on MariaDB/MySQL |
-| No order persistence | Keeps the schema simple; a `orders`/`order_items` table would be added for a real reservation workflow |
-
----
-
-## Future Improvements
-
-1. **Order confirmation endpoint** — `POST /api/orders/confirm` with `SELECT … FOR UPDATE` locking to actually reserve stock.
-2. **Inventory management** — UI for warehouse managers to update stock levels.
-3. **Real road distances** — Replace fixed `distance_km` with geocoded actual distances via a mapping API.
-4. **Historical delivery data** — Analyse whether past delivery patterns improve warehouse selection.
-5. **API authentication** — Token-based auth if the API is exposed to external systems.
-6. **Minimise warehouse count** — Add a secondary objective to prefer fewer warehouses when scores are equal.
