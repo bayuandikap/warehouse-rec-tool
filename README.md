@@ -315,13 +315,120 @@ integers between 1 and 9,999.
 
 ## Deployment
 
-### Recommended providers: Railway, Render, Fly.io (free tier)
+### InfinityFree (free shared hosting)
+
+InfinityFree supports PHP 8.3 and MySQL, which is fully compatible with this
+application. There are several constraints that require specific workarounds.
+
+**Constraints and how this project handles them:**
+
+| Constraint | Impact | Workaround applied |
+|---|---|---|
+| No SSH / no CLI | Can't run `php artisan` | Schema + seed data provided as a SQL file for phpMyAdmin import |
+| Web root is always `htdocs/` | Laravel's `public/` can't be web root | `htdocs.htaccess` redirects all traffic through `public/` |
+| `open_basedir` restriction | PHP can't read outside `htdocs/` | Everything uploaded into `htdocs/`; `htdocs.htaccess` handles routing |
+| No symlinks | `php artisan storage:link` fails | Not needed — this app has no file uploads |
+| 1 MB file upload limit | Large files silently rejected | Autoloader is 560 KB — safely under the limit |
+| No background workers | Queues, schedulers don't work | Already using `QUEUE_CONNECTION=sync` |
+| Database host is NOT `localhost` | Different host per account | Documented in `.env.infinityfree` template |
+
+---
+
+#### Step-by-step InfinityFree deployment
+
+**1. Create your InfinityFree account and hosting**
+- Sign up at [infinityfree.com](https://infinityfree.com)
+- Create a new hosting account — you'll get a subdomain like `yourapp.infinityfreeapp.com`
+
+**2. Create the MySQL database**
+- In your control panel → **MySQL Databases**
+- Create a database and note the **host**, **database name**, **username**, **password**
+- The host will be something like `sql123.infinityfree.com` — it is **not** `localhost`
+
+**3. Import the database schema + seed data**
+- In the control panel → **phpMyAdmin**
+- Select your new database
+- Click **Import** → upload `deploy/database_seed.sql`
+- This creates all tables and inserts the 5 products, 8 warehouses, and 40 inventory rows
+
+**4. Prepare your `.env` file locally**
+```
+# Copy the template
+cp .env.infinityfree .env.production
+
+# Edit .env.production with your actual values:
+APP_KEY=          # Run: php artisan key:generate --show
+APP_URL=          # Your InfinityFree subdomain, e.g. https://yourapp.infinityfreeapp.com
+DB_HOST=          # From control panel (e.g. sql123.infinityfree.com)
+DB_DATABASE=      # From control panel
+DB_USERNAME=      # From control panel
+DB_PASSWORD=      # Your database password
+APP_DEBUG=false   # MUST be false in production
+```
+
+**5. Generate your APP_KEY**
+```bash
+php artisan key:generate --show
+# Copy the output (base64:...) into .env.production
+```
+
+**6. Clear local caches before uploading**
+```bash
+php artisan optimize:clear
+```
+
+**7. Package the files**
+
+Zip the files in two batches (the File Manager has upload limits):
+```bash
+# On Windows — use 7-Zip or Windows Explorer right-click → Send to → Compressed
+# Zip 1: everything except vendor/  (name it: project.zip)
+# Zip 2: the vendor/ folder alone   (name it: vendor.zip)
+```
+
+**8. Upload via File Manager**
+- In the control panel → **File Manager** → open `htdocs/`
+- Upload and extract `project.zip` into `htdocs/`
+- Upload and extract `vendor.zip` into `htdocs/` (merges with existing `vendor/` folder)
+- Upload your `.env.production` file, rename it to `.env` in the file manager
+- Upload `htdocs.htaccess` from your project root, rename it to `.htaccess` in `htdocs/`
+
+**Your final `htdocs/` structure should be:**
+```
+htdocs/
+├── .htaccess          ← renamed from htdocs.htaccess
+├── .env               ← renamed from .env.production
+├── app/
+├── bootstrap/
+├── config/
+├── public/
+│   ├── index.php
+│   └── .htaccess      ← Laravel's built-in, leave untouched
+├── resources/
+├── routes/
+├── storage/
+├── vendor/
+└── ...
+```
+
+**9. Test your deployment**
+- Visit your subdomain — you should see the warehouse selection UI
+- Try submitting an order with P001 × 50
+- Check `/api/warehouse-selection` responds to a POST request
+
+**10. Security hardening**
+- Confirm `APP_DEBUG=false` in `.env`
+- Confirm `.env` is not publicly accessible (the `htdocs.htaccess` routes it to `public/.env` which doesn't exist → 404)
+
+---
+
+### Other providers (Railway, Render, Fly.io)
 
 ```bash
-# Production .env settings
+# Standard Laravel deployment on a proper server
 APP_ENV=production
 APP_DEBUG=false
-APP_KEY=<generate with: php artisan key:generate --show>
+APP_KEY=<php artisan key:generate --show>
 APP_URL=https://your-domain.com
 
 DB_CONNECTION=mysql
@@ -335,18 +442,12 @@ SESSION_DRIVER=file
 CACHE_STORE=file
 QUEUE_CONNECTION=sync
 
-# After deploying:
+# After deployment:
 php artisan migrate --force
 php artisan db:seed --force
 php artisan config:cache
 php artisan route:cache
 ```
-
-**Security checklist before going live:**
-- `APP_DEBUG=false`
-- No `.env` committed to git
-- `APP_KEY` is set and secret
-- Database credentials not exposed
 
 ---
 
