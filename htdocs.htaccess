@@ -1,0 +1,13 @@
+# Place this file at htdocs/.htaccess on InfinityFree (NOT inside public/).
+# It redirects all requests through Laravel's public/ folder,
+# which is the correct web root for Laravel but can't be set directly
+# on InfinityFree shared hosting.
+
+RewriteEngine On
+
+# Map /storage/... requests to storage/app/public/...
+# (replaces php artisan storage:link which doesn't work on InfinityFree)
+RewriteRule ^storage/(.*)$ /storage/app/public/$1 [END]
+
+# Route everything else through Laravel's public front-controller
+RewriteRule (.*) /public/$1 [L]
